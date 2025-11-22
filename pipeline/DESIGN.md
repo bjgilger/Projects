@@ -1,5 +1,6 @@
 # Design Criteria
 ## Assumptions
+- Assume standard CSV quoting; Pandas default parser is sufficient.
 - The typical user is a small service business
 - Jobs are scheduled and completed on specific dates.
 - Each row represents one job or one invoice line.
@@ -14,33 +15,43 @@
 ## Input Schema 
 *CSV file: data/raw/transactions.csv*
 
-| Column | Type | Unique | Required | Notes |
-|:---------| :--------|:---:| :---:|:-----------------------------------------------------------------------------|
-| job_id | String | Yes | Yes | |
-| date | String | No | Yes | Format YYYY-MM-DD. Invalid date: row goes to the error log. |
-| client_name | String | No | Yes | |
-| service_type | String | No | Yes | Examples: plumbing, installation, maintenance, consulting, class, private_session |
-| labor_amount | Numeric | No | Yes | Default is 0. Invalid numeric value: row is sent to the error log. |
-| materials_amount | Numeric | No | Yes | Default is 0. Can be empty |
-| tax_amount | Numeric | No | No | Default is 0. |
-| total_amount | Numeric | No | Yes | Calculation: total_amount ≈ labor_amount + materials_amount + tax_amount. Small rounding differences and log mismatches will be allowed. |
-| payment_status | Categorical | No | No | Values: paid, unpaid, partial. Normalized to lower case. Unknown: row is sent to the error log. |
-| payment_method | Categorical | No | No | Values: cash, card, bank_transfer, check, online. Unknown values: other with a warning |
-| source | String | No | No | Examples: website, referral, walk_in, facebook, yelp. |
-| notes | Free text | No | No | Ignored for metrics, retained in cleaned output |
+| Column | Type | Unique | Required | Notes                                                                                                                                                                  |
+|:---------| :--------|:------:|:--------:|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| job_id | String |   No   |   Yes    |                                                                                                                                                                        |
+| date | String |   No   |   Yes    | Format YYYY-MM-DD. Invalid date: row goes to the error log.                                                                                                            |
+| client_name | String |   No   |   Yes    |                                                                                                                                                                        |
+| service_type | String |   No   |   Yes    | Examples: plumbing, installation, maintenance, consulting, class, private_session                                                                                      |
+| labor_amount | Numeric |   No   |   Yes    | Fatal if invalid.                                                                                                                                                      |
+| materials_amount | Numeric |   No   |    No    | Treat invalid as 0.                                                                                                                                                    |
+| tax_amount | Numeric |   No   |    No    | Treat invalid as 0.                                                                                                                                                    |
+| total_amount | Numeric |   No   |   Yes    | Calculation: total_amount ≈ labor_amount + materials_amount + tax_amount. abs(total_amount - (labor_amount + materials_amount + tax_amount)) > 0.05 -> warning logged. |
+| payment_status | Categorical |   No   |   Yes    | Values: paid, unpaid, partial. Normalized to lower case. Unknown: row is sent to the error log.                                                                        |
+| payment_method | Categorical |   No   |    No    | Values: cash, card, bank_transfer, check, online. Unknown values: other with a warning.                                                                                |
+| source | String |   No   |    No    | Examples: website, referral, walk_in, facebook, yelp.                                                                                                                  |
+| notes | Free text |   No   |    No    | Ignored for metrics, retained in cleaned output                                                                                                                        |
+## String Normalization Rules
+- service_type: lowercased
+- payment_status: lowercased
+- payment_method: After trimming and lowercasing, compare against canonical set.
+- client_name: trimmed, original casing preserved
+- source: lowercased
+- notes: trimmed, case preserved
 ## Row validation rules:
-A row is **fatal** (goes to error log, excluded from metrics) if:
-- date is missing or cannot be parsed.
-- job_id is missing.
-- client_name is missing.
-- service_type is missing.
-- labor_amount or total_amount is not numeric.
-- payment_status is missing or not in the allowed set after normalization.
-A row is **valid with warnings** (kept, but warning logged) if:
-- materials_amount or tax_amount cannot be parsed. We treat them as 0.
-- payment_method is not recognized. We map it to *other*.
-- total_amount does not match the sum of parts within a tolerance.
-- service_type is an unexpected value. We keep it but log it.
+A row is **fatal** if:
+- date missing or invalid
+- job_id missing
+- client_name missing
+- service_type missing
+- labor_amount or total_amount not numeric
+- payment_status missing or invalid
+A row is **valid with warnings** if:
+- materials_amount or tax_amount invalid; replace with 0
+- payment_method unrecognized; set to *other*
+- total_amount mismatch exceeds tolerance of 0.05
+- unknown service_type; keep but log, no remapping
+- **Completely empty rows** are ignored. 
+- **Rows with fewer or more columns than expected (12)** are fatal.
+- Whitespace-only fields (" " (spaces only), "\t" (tabs), " \n " (just newline and spaces)) arre treated as missing for required fields.
 ## Outputs 
 ### Cleaned transactions output file
 *File: data/processed/transactions_cleaned.csv*
@@ -58,7 +69,9 @@ Columns:
 - details
 - ### Console summary
 - When running python *scripts/run_pipeline.py data/raw/transactions.csv*, print:
-- Date range
+- Date range: 
+  - start_date = minimum valid date
+  - end_date = maximum valid date
 - Total revenue
 - Net income
 - Top 3 service types by revenue
